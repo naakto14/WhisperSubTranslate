@@ -101,7 +101,7 @@ VRAM figures for whisper.cpp models are with GGML optimization, much lower than 
 ## Language support
 
 - UI: Korean, English, Japanese, Chinese, Polish
-- Translation targets (14): ko, en, ja, zh, es, fr, de, it, pt, ru, hu, ar, pl, fa
+- Translation targets (15): ko, en, ja, zh, es, fr, de, it, pt, ru, hu, ar, pl, tr, fa
 - Audio recognition: 100+ languages via whisper.cpp
 
 ## Data storage
@@ -133,6 +133,7 @@ Thanks to everyone who helps make WhisperSubTranslate better.
 
 <a href="https://github.com/Blue-B"><img src="https://github.com/Blue-B.png?size=80" width="80" alt="Blue-B" title="Blue-B" /></a>
 <a href="https://github.com/matbgn"><img src="https://github.com/matbgn.png?size=80" width="80" alt="matbgn" title="matbgn" /></a>
+<a href="https://github.com/AtillaTahak"><img src="https://github.com/AtillaTahak.png?size=80" width="80" alt="AtillaTahak" title="AtillaTahak" /></a>
 
 ## Support
 

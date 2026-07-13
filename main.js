@@ -1759,8 +1759,8 @@ function getWhisperVadArgs() {
 
 // Single File Subtitle Extraction (Promise-based) - whisper.cpp 버전
 function extractSingleFile(filePath, model, language, device) {
-  return new Promise(async (resolve, reject) => {
-    try {
+  return new Promise((resolve, reject) => {
+    const start = async () => {
       console.log(`[START] Processing: ${path.basename(filePath)}`);
       isUserStopped = false;
 
@@ -2056,6 +2056,7 @@ function extractSingleFile(filePath, model, language, device) {
       }
 
       const mainSpawnEnv = getWhisperSpawnEnv(chosenDevice, exeCwd);
+      let stderrBuffer = '';
       currentProcess = spawn(exePath, args, {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -2078,6 +2079,7 @@ function extractSingleFile(filePath, model, language, device) {
 
       currentProcess.stderr.on('data', (data) => {
         const output = data.toString('utf8');
+        stderrBuffer = (stderrBuffer + output).slice(-8192);
         // 일반 경로는 whisper -pp %가 곧 파일 전체 진행률 → 그대로 전송
         const pct = parseWhisperProgress(output);
         if (pct != null) sendExtractionProgress(pct);
@@ -2147,6 +2149,12 @@ function extractSingleFile(filePath, model, language, device) {
           resolve(finalSrtPath);
         } else {
           let errorMessage = `Error code: ${code}`;
+          const stderrText = stderrBuffer.toLowerCase();
+          const looksLikeDyldMissingLib =
+            process.platform === 'darwin' &&
+            (stderrText.includes('dyld: library not loaded') ||
+              (stderrText.includes('library not loaded:') && stderrText.includes('.dylib')) ||
+              (stderrText.includes('image not found') && stderrText.includes('.dylib')));
           if (code === 3221225785) {
             // 0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND
             const cpuAvailable = fs.existsSync(cpuExePath);
@@ -2170,6 +2178,10 @@ function extractSingleFile(filePath, model, language, device) {
               'Download: https://aka.ms/vs/17/release/vc_redist.x64.exe';
           } else if (code === 3221226505) {
             errorMessage = 'GPU memory shortage or driver issue';
+          } else if (looksLikeDyldMissingLib) {
+            errorMessage =
+              `${WHISPER_CLI_NAME} failed to launch on macOS because a required shared library is missing. ` +
+              'Run npm install again to restore whisper-cpp, or rebuild it so libwhisper*.dylib and libggml*.dylib are copied into whisper-cpp/.';
           } else if (code === null || code === undefined) {
             errorMessage = 'Process terminated abnormally (possible memory shortage)';
           } else if (code === 1) {
@@ -2255,9 +2267,8 @@ function extractSingleFile(filePath, model, language, device) {
           reject(err);
         }
       });
-    } catch (err) {
-      reject(err);
-    }
+    };
+    start().catch(reject);
   });
 }
 
@@ -2397,7 +2408,7 @@ ipcMain.handle('extract-subtitles', async (event, payload) => {
 });
 
 // Other handlers
-ipcMain.handle('show-open-dialog', async (event, options) => {
+ipcMain.handle('show-open-dialog', async (_event, options) => {
   return await dialog.showOpenDialog(mainWindow, options);
 });
 
@@ -2492,7 +2503,7 @@ ipcMain.handle('secure-clear-history', async (event) => {
   }
 });
 
-ipcMain.handle('open-file-location', async (event, filePath) => {
+ipcMain.handle('open-file-location', async (_event, filePath) => {
   const { shell } = require('electron');
   if (!isSafeLocalPath(filePath)) {
     return { success: false, error: 'invalid path' };
@@ -2512,7 +2523,7 @@ ipcMain.handle('open-file-location', async (event, filePath) => {
 });
 
 // 폴더 열기
-ipcMain.handle('open-folder', async (event, folderPath) => {
+ipcMain.handle('open-folder', async (_event, folderPath) => {
   const { shell } = require('electron');
   if (!isSafeLocalPath(folderPath)) {
     return { success: false, error: 'invalid path' };
@@ -2556,7 +2567,7 @@ function isAllowedOpenExternalUrl(rawUrl) {
   }
 }
 
-ipcMain.handle('open-external', async (event, url) => {
+ipcMain.handle('open-external', async (_event, url) => {
   const { shell } = require('electron');
   if (!isAllowedOpenExternalUrl(url)) {
     console.warn('[Security] Blocked open-external for URL:', url);
@@ -2682,7 +2693,7 @@ ipcMain.handle('check-model-status', async () => {
 });
 
 // 모델 자동 다운로드 (Hugging Face: ggerganov/whisper.cpp GGML 형식)
-ipcMain.handle('download-model', async (event, modelName) => {
+ipcMain.handle('download-model', async (_event, modelName) => {
   try {
     // GGML 모델 파일 URL 매핑
     const modelUrlMap = {
@@ -2850,7 +2861,7 @@ ipcMain.handle('stop-current-process', async () => {
 // ========== 번역 관련 IPC 핸들러 ==========
 
 // API 키 저장
-ipcMain.handle('save-api-keys', async (event, keys) => {
+ipcMain.handle('save-api-keys', async (_event, keys) => {
   try {
     const result = translator.saveApiKeys(keys);
     return { success: result };
@@ -2872,7 +2883,7 @@ ipcMain.handle('load-api-keys', async () => {
 // 오프라인 관련 IPC 제거됨
 
 // API 키 유효성 검사 (임시 키 지원)
-ipcMain.handle('validate-api-keys', async (event, tempKeys) => {
+ipcMain.handle('validate-api-keys', async (_event, tempKeys) => {
   try {
     console.log('[API Key Validation]', {
       hasTempKeys: !!tempKeys,
@@ -2974,7 +2985,7 @@ ipcMain.handle(
 );
 
 // 텍스트 직접 번역 (테스트용)
-ipcMain.handle('translate-text', async (event, { text, method, targetLang }) => {
+ipcMain.handle('translate-text', async (_event, { text, method, targetLang }) => {
   try {
     const result = await translator.translateAuto(text, method, targetLang);
     return { success: true, translatedText: result };
@@ -3012,7 +3023,7 @@ ipcMain.handle('get-gpu-info', async () => {
 });
 
 // nya.wav 파일을 base64로 읽어서 반환 (renderer에서 file:// 보안 문제 회피)
-ipcMain.handle('get-audio-data', async (event, filename) => {
+ipcMain.handle('get-audio-data', async (_event, filename) => {
   try {
     const basePath = app.isPackaged ? process.resourcesPath : __dirname;
     const filePath = path.join(basePath, filename);
@@ -3111,7 +3122,7 @@ ipcMain.handle('local-model-delete', async (_event, modelId) => {
   return true;
 });
 
-ipcMain.handle('local-translate', async (event, { text, targetLang, modelId }) => {
+ipcMain.handle('local-translate', async (_event, { text, targetLang, modelId }) => {
   try {
     const result = await localTranslator.translateLocal(
       text,
