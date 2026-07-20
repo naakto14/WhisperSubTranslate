@@ -2608,7 +2608,7 @@ function updateQueueDisplayImmediate() {
         // 확장자 뱃지 (SRT는 보라색, 동영상은 초록색)
         const extBadge = isSrt
           ? `<span class="ext-badge srt">SRT</span>`
-          : `<span class="ext-badge video">${ext.toUpperCase().substring(1)}</span>`;
+          : `<span class="ext-badge video">${escAttr(ext.toUpperCase().substring(1))}</span>`;
 
         const isValid = isVideoFile(file.path) || isSrtFile(file.path);
 

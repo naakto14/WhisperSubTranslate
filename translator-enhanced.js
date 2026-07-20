@@ -1651,7 +1651,12 @@ ${lines}`;
       const out = (translatedTexts[k] || '').trim();
       if (src && localTranslator.isEffectivelySameText(out, src, 1)) unchanged++;
     }
-    if (translatedTexts.length > 0 && unchanged / translatedTexts.length >= 0.8) {
+    const unchangedRatio = translatedTexts.length > 0 ? unchanged / translatedTexts.length : 0;
+    const passthroughDetected =
+      method === 'local'
+        ? translatedTexts.length > 0 && unchangedRatio >= 0.8
+        : translatedTexts.length >= 5 && unchangedRatio >= 0.9;
+    if (passthroughDetected) {
       throw new Error(
         `TRANSLATION_PASSTHROUGH: ${unchanged}/${translatedTexts.length} segments were left untranslated ` +
           `(translation engine likely failed or crashed). The subtitles were NOT translated.`

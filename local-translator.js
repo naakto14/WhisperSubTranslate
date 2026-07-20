@@ -286,12 +286,22 @@ async function downloadModel(onProgress, signal, modelId = DEFAULT_MODEL_ID) {
           }
       };
     }
-    return _downloadPromises[modelId];
+    return await waitForDownload(_downloadPromises[modelId], signal);
   }
   _downloadPromises[modelId] = _downloadModelImpl(onProgress, signal, modelId).finally(() => {
     delete _downloadPromises[modelId];
   });
-  return _downloadPromises[modelId];
+  return await waitForDownload(_downloadPromises[modelId], signal);
+}
+
+function waitForDownload(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || new Error('Download cancelled'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || new Error('Download cancelled'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 async function _downloadModelImpl(onProgress, signal, modelId) {
@@ -303,36 +313,52 @@ async function _downloadModelImpl(onProgress, signal, modelId) {
   const tmp = dest + '.tmp';
 
   return new Promise((resolve, reject) => {
-    const doRequest = (url, redirects = 0) => {
-      if (redirects > 5) return reject(new Error('Too many redirects'));
+    let settled = false;
+    const abortError = () =>
+      signal?.reason instanceof Error ? signal.reason : new Error('Download cancelled');
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        fs.unlinkSync(tmp);
+      } catch {}
+      reject(error);
+    };
 
-      const req = https.get(url, (res) => {
+    const doRequest = (url, redirects = 0) => {
+      if (settled) return;
+      if (signal?.aborted) return fail(abortError());
+      if (redirects > 5) return fail(new Error('Too many redirects'));
+
+      let out = null;
+      let req = null;
+      const detachAbort = () => signal?.removeEventListener('abort', abortRequest);
+      const abortRequest = () => {
+        req?.destroy();
+        out?.destroy();
+        fail(abortError());
+      };
+
+      req = https.get(url, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
+          detachAbort();
           res.resume();
           return doRequest(res.headers.location, redirects + 1);
         }
         if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode}`));
+          detachAbort();
+          res.resume();
+          return fail(new Error(`HTTP ${res.statusCode}`));
         }
 
         const total = parseInt(res.headers['content-length'] || m.sizeBytes, 10);
         let downloaded = 0;
-        const out = fs.createWriteStream(tmp);
-
-        if (signal) {
-          signal.addEventListener(
-            'abort',
-            () => {
-              req.destroy();
-              out.destroy();
-              try {
-                fs.unlinkSync(tmp);
-              } catch {}
-              reject(new Error('Download cancelled'));
-            },
-            { once: true }
-          );
-        }
+        out = fs.createWriteStream(tmp);
+        out.on('error', (error) => {
+          detachAbort();
+          res.destroy();
+          fail(error);
+        });
 
         res.on('data', (chunk) => {
           downloaded += chunk.length;
@@ -351,20 +377,30 @@ async function _downloadModelImpl(onProgress, signal, modelId) {
         });
 
         res.on('end', () => {
-          out.close(() => {
-            fs.renameSync(tmp, dest);
-            resolve(dest);
+          detachAbort();
+          out.end(() => {
+            if (settled) return;
+            try {
+              fs.renameSync(tmp, dest);
+              settled = true;
+              resolve(dest);
+            } catch (error) {
+              fail(error);
+            }
           });
         });
 
-        res.on('error', (e) => {
+        res.on('error', (error) => {
+          detachAbort();
           out.destroy();
-          reject(e);
+          fail(error);
         });
       });
 
-      req.on('error', (e) => {
-        if (e.message !== 'Download cancelled') reject(e);
+      signal?.addEventListener('abort', abortRequest, { once: true });
+      req.on('error', (error) => {
+        detachAbort();
+        fail(signal?.aborted ? abortError() : error);
       });
     };
 

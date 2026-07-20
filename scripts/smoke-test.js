@@ -99,6 +99,67 @@ function runWhisperRuntimeProbe() {
   }
 }
 
+async function runModelDownloadAbort() {
+  const https = require('https');
+  const { EventEmitter } = require('events');
+  const electronPath = require.resolve('electron');
+  const originalElectron = require.cache[electronPath].exports;
+  const originalGet = https.get;
+  const modelDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wst-model-abort-'));
+  const controller = new AbortController();
+  let requestCount = 0;
+  let destroyed = false;
+
+  try {
+    require.cache[electronPath].exports = { app: { getPath: () => modelDir } };
+    https.get = (_url, callback) => {
+      const request = new EventEmitter();
+      request.destroy = () => {
+        destroyed = true;
+        request.emit('error', new Error('socket closed'));
+      };
+      requestCount++;
+      if (requestCount === 1) {
+        queueMicrotask(() => callback({ statusCode: 302, headers: { location: 'https://example.test/model' }, resume() {} }));
+      } else {
+        queueMicrotask(() => controller.abort(new Error('ABORTED: test download')));
+      }
+      return request;
+    };
+
+    await assert.rejects(() => localTranslator.downloadModel(null, controller.signal), /ABORTED: test download/);
+    assert.strictEqual(requestCount, 2, 'download should follow one redirect before aborting');
+    assert.strictEqual(destroyed, true, 'abort should destroy the active request before a response arrives');
+
+    requestCount = 0;
+    destroyed = false;
+    https.get = () => {
+      const request = new EventEmitter();
+      request.destroy = () => {
+        destroyed = true;
+        request.emit('error', new Error('socket closed'));
+      };
+      requestCount++;
+      return request;
+    };
+
+    const owner = new AbortController();
+    const ownerDownload = localTranslator.downloadModel(null, owner.signal);
+    const waiter = new AbortController();
+    waiter.abort(new Error('ABORTED: second waiter'));
+    await assert.rejects(() => localTranslator.downloadModel(null, waiter.signal), /ABORTED: second waiter/);
+    assert.strictEqual(destroyed, false, 'a waiting caller must not cancel the shared transfer');
+    owner.abort(new Error('ABORTED: download owner'));
+    await assert.rejects(() => ownerDownload, /ABORTED: download owner/);
+    assert.strictEqual(requestCount, 1, 'shared callers must reuse one request');
+    assert.strictEqual(destroyed, true, 'the transfer owner must still be able to cancel the request');
+  } finally {
+    https.get = originalGet;
+    require.cache[electronPath].exports = originalElectron;
+    fs.rmSync(modelDir, { recursive: true, force: true });
+  }
+}
+
 async function runLocalTranslationGuards() {
   assert.strictEqual(localTranslator.looksUntranslated('Hola mundo!', 'Hola mundo.', 'en'), true);
   assert.strictEqual(localTranslator.looksUntranslated('Hello world', 'Hola mundo', 'en'), false);
@@ -190,6 +251,18 @@ async function runLocalTranslationGuards() {
     'en'
   );
   assert.ok(validOutput.includes('Christopher') && validOutput.includes('Goodbye'));
+
+  const onlineProperName = new EnhancedSubtitleTranslator();
+  onlineProperName.translateBatch = async (texts) => texts;
+  const onlineProperNameOutput = await onlineProperName.translateSRTContent(makeSrt(['Christopher']), 'chatgpt', 'en');
+  assert.ok(onlineProperNameOutput.includes('Christopher'));
+
+  const onlinePassthrough = new EnhancedSubtitleTranslator();
+  onlinePassthrough.translateBatch = async (texts) => texts;
+  await assert.rejects(
+    () => onlinePassthrough.translateSRTContent(makeSrt(Array(5).fill('Hola mundo')), 'chatgpt', 'en'),
+    /TRANSLATION_PASSTHROUGH/
+  );
 }
 
 async function run() {
@@ -218,6 +291,7 @@ async function run() {
   runSrtCleanup();
   runSrtFromWhisperJson();
   runWhisperRuntimeProbe();
+  await runModelDownloadAbort();
   await runLocalTranslationGuards();
 
   console.log('Smoke tests passed.');

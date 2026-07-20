@@ -13,7 +13,7 @@ Patch release for the Turkish translation target, macOS whisper runtime detectio
 ### Fixed
 
 - **Local translation hanging after a device or model change** - switching between Auto and CPU could deadlock because model loading tried to acquire a lock already held by the current translation. Model load, translation, and unload now share one serialized operation queue without nested locking.
-- **Stop and timeout handling for local translation** - stopping a job now aborts active Hy-MT2 inference, and model operations fail with a clear error after three minutes instead of waiting indefinitely.
+- **Stop and timeout handling for local translation** - stopping a job now aborts active Hy-MT2 inference or model download, and model operations fail with a clear error after three minutes instead of waiting indefinitely.
 - **Untranslated local output detection** - comparisons now ignore case, Unicode width, spacing, and punctuation, catch short labeled echoes such as `Original: ...`, and reject files when at least 80% of cues are effectively unchanged.
 - **macOS whisper runtime detection** - the installer validates the downloaded CLI by launching it and only applies the `dyld` fallback when the runtime error actually matches a missing shared library.
 - **Korean drop-zone hint** - restored the functional file-selection text after an unrelated translation update replaced it.
