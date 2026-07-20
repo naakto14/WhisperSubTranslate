@@ -2,6 +2,27 @@
 
 All notable changes to WhisperSubTranslate are documented here. This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.4.3] - 2026-07-20
+
+Patch release for the Turkish translation target, macOS whisper runtime detection, and local Hy-MT2 reliability.
+
+### Added
+
+- **Turkish translation target** - Turkish (`tr`) is available in the target picker, provider mappings, localized labels, documentation, and UI tests.
+
+### Fixed
+
+- **Local translation hanging after a device or model change** - switching between Auto and CPU could deadlock because model loading tried to acquire a lock already held by the current translation. Model load, translation, and unload now share one serialized operation queue without nested locking.
+- **Stop and timeout handling for local translation** - stopping a job now aborts active Hy-MT2 inference, and model operations fail with a clear error after three minutes instead of waiting indefinitely.
+- **Untranslated local output detection** - comparisons now ignore case, Unicode width, spacing, and punctuation, catch short labeled echoes such as `Original: ...`, and reject files when at least 80% of cues are effectively unchanged.
+- **macOS whisper runtime detection** - the installer validates the downloaded CLI by launching it and only applies the `dyld` fallback when the runtime error actually matches a missing shared library.
+- **Korean drop-zone hint** - restored the functional file-selection text after an unrelated translation update replaced it.
+
+### Internal
+
+- Renderer status markup is built with DOM nodes, and translated HTML used by model and queue views is filtered before insertion.
+- Pull requests now verify that generated locale output matches the source JSON files.
+
 ## [2.4.2] — 2026-06-24
 
 Sync accuracy release: a dedicated Faster-Whisper engine repairs subtitle drift, the unreliable SenseVoice timing path is gone, and local translation no longer fails silently or shows misleading API errors.

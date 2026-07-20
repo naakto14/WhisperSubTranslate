@@ -30,6 +30,48 @@ let soundMuted = localStorage.getItem('soundMuted') === 'true';
 // 실패 항목 자동 재시도 상한 — 무한루프 방지 (파일당 autoRetryCount로 추적)
 const AUTO_RETRY_MAX = 2;
 
+// 번역 상태 문자열은 locales의 <strong>/<br>만 허용해 DOM으로 만든다.
+function setStatusMarkup(element, markup) {
+  const fragment = document.createDocumentFragment();
+  let parent = fragment;
+  String(markup || '')
+    .split(/(<strong(?:\s[^>]*)?>|<\/strong>|<br\s*\/?>)/gi)
+    .filter(Boolean)
+    .forEach((part) => {
+      if (/^<strong/i.test(part)) {
+        const strong = document.createElement('strong');
+        if (/color\s*:\s*#e74c3c/i.test(part)) strong.style.color = '#e74c3c';
+        fragment.appendChild(strong);
+        parent = strong;
+      } else if (/^<\/strong/i.test(part)) {
+        parent = fragment;
+      } else if (/^<br/i.test(part)) {
+        fragment.appendChild(document.createElement('br'));
+      } else {
+        parent.appendChild(document.createTextNode(part));
+      }
+    });
+  element.replaceChildren(fragment);
+}
+
+function setSafeHtml(element, markup) {
+  const doc = new DOMParser().parseFromString(String(markup || ''), 'text/html');
+  doc.querySelectorAll('script,iframe,object,embed,link,meta,style,base').forEach((node) => node.remove());
+  doc.body.querySelectorAll('*').forEach((node) => {
+    Array.from(node.attributes).forEach((attr) => {
+      const name = attr.name.toLowerCase();
+      if (
+        name.startsWith('on') ||
+        name === 'srcdoc' ||
+        (['href', 'src', 'xlink:href', 'formaction'].includes(name) && /^\s*(?:javascript|vbscript):/i.test(attr.value))
+      ) {
+        node.removeAttribute(attr.name);
+      }
+    });
+  });
+  element.replaceChildren(...Array.from(doc.body.childNodes, (node) => document.importNode(node, true)));
+}
+
 // Toast notification (토스트 알림)
 function showToast(message, options = {}) {
   // 기존 토스트 제거
@@ -175,13 +217,18 @@ function updateUIMode() {
       // 항상 내용 업데이트 (언어 변경 대응)
       // "번역 안함" 선택 시 SRT 스킵 예고 경고 추가
       const translationValue = translationSelect?.value;
+      const warning = document.createElement('span');
+      warning.textContent = warningText;
       if (translationValue === 'none') {
         const skipWarningText =
           d.srtWillBeSkipped ||
           'SRT files will be skipped without translation settings. Please select a translation method.';
-        mixedWarning.innerHTML = `<span>${warningText}</span><span class="skip-warning">${skipWarningText}</span>`;
+        const skipWarning = document.createElement('span');
+        skipWarning.className = 'skip-warning';
+        skipWarning.textContent = skipWarningText;
+        mixedWarning.replaceChildren(warning, skipWarning);
       } else {
-        mixedWarning.innerHTML = `<span>${warningText}</span>`;
+        mixedWarning.replaceChildren(warning);
       }
     } else {
       const mixedWarning = document.getElementById('mixedFileWarning');
@@ -1239,9 +1286,7 @@ async function continueProcessing() {
     // 실패 항목 자동 재시도(옵션): 큐가 끝난 시점에 error 항목을 상한 회수까지 다시 태운다.
     // 사용자가 직접 중지한 경우(shouldStop/stopped)는 건드리지 않는다.
     if (!shouldStop && localStorage.getItem('autoRetryFailed') === 'true') {
-      const retryables = fileQueue.filter(
-        (f) => f.status === 'error' && (f.autoRetryCount || 0) < AUTO_RETRY_MAX
-      );
+      const retryables = fileQueue.filter((f) => f.status === 'error' && (f.autoRetryCount || 0) < AUTO_RETRY_MAX);
       if (retryables.length > 0) {
         retryables.forEach((f) => {
           f.autoRetryCount = (f.autoRetryCount || 0) + 1;
@@ -1698,7 +1743,7 @@ function getLocalizedError(errorMessage) {
   if (errorMessage.includes('SRT file path missing') || errorMessage.includes('SRT 파일 경로')) {
     return lang.errorSrtPathMissing;
   }
-  if (errorMessage.includes('TRANSLATION_PASSTHROUGH')) {
+  if (errorMessage.includes('TRANSLATION_PASSTHROUGH') || errorMessage.includes('LOCAL_TIMEOUT')) {
     return lang.errorTranslationPassthrough || lang.errorEmptyTranslation;
   }
   if (errorMessage.includes('empty translation') || errorMessage.includes('번역 결과가 비어')) {
@@ -1775,7 +1820,8 @@ const MODEL_I18N = {
 const MODEL_DESC_I18N = {
   ko: {
     'large-v3-turbo': '빠르고 싱크 정확, 대부분 영상에 적합',
-    'large-v2-sync': '싱크가 안 맞는 영상 교정용. 비영어(일/한/중)에 가장 정확, 영어는 turbo로 충분. 장치 선택 따름. 느림',
+    'large-v2-sync':
+      '싱크가 안 맞는 영상 교정용. 비영어(일/한/중)에 가장 정확, 영어는 turbo로 충분. 장치 선택 따름. 느림',
     'large-v2-sync-lite': '정밀과 같은 모델을 int8로 가볍게. VRAM 약 3GB, 렉 적음. 싱크 품질은 거의 동일',
     'large-v3': '받아쓰기는 조금 더 정확하지만 긴 영상에서 싱크가 밀리고 느림',
     medium: '고사양 PC용, GPU 없어도 됨',
@@ -1785,7 +1831,8 @@ const MODEL_DESC_I18N = {
   },
   en: {
     'large-v3-turbo': 'Fast, accurate sync, best for most videos',
-    'large-v2-sync': 'Fixes subtitles that will not sync. Best for non-English (JA/KO/ZH); English is fine with turbo. Follows device choice. Slow',
+    'large-v2-sync':
+      'Fixes subtitles that will not sync. Best for non-English (JA/KO/ZH); English is fine with turbo. Follows device choice. Slow',
     'large-v2-sync-lite': 'Same model in int8, lighter. ~3GB VRAM, less lag. Sync quality nearly identical',
     'large-v3': 'Slightly better text but sync drifts and slower on long videos',
     medium: 'High-spec PC, works without GPU',
@@ -1795,7 +1842,8 @@ const MODEL_DESC_I18N = {
   },
   ja: {
     'large-v3-turbo': '高速で同期正確、ほとんどの動画に最適',
-    'large-v2-sync': '同期が合わない映像の補正用。非英語(日/韓/中)に最も正確、英語はturboで十分。デバイス選択に従う。低速',
+    'large-v2-sync':
+      '同期が合わない映像の補正用。非英語(日/韓/中)に最も正確、英語はturboで十分。デバイス選択に従う。低速',
     'large-v2-sync-lite': '精密と同じモデルをint8で軽量化。VRAM約3GB、ラグ少。同期品質はほぼ同じ',
     'large-v3': '文字起こしはやや上だが長い動画で同期がずれ、低速',
     medium: '高スペックPC用、GPU不要',
@@ -1815,7 +1863,8 @@ const MODEL_DESC_I18N = {
   },
   pl: {
     'large-v3-turbo': 'Szybki, dokładna synchronizacja, najlepszy do większości filmów',
-    'large-v2-sync': 'Naprawia napisy bez synchronizacji. Najlepszy dla nieangielskich (JA/KO/ZH); angielski OK z turbo. Wg wyboru urządzenia. Wolny',
+    'large-v2-sync':
+      'Naprawia napisy bez synchronizacji. Najlepszy dla nieangielskich (JA/KO/ZH); angielski OK z turbo. Wg wyboru urządzenia. Wolny',
     'large-v2-sync-lite': 'Ten sam model w int8, lżejszy. ~3GB VRAM, mniej zacięć. Synchronizacja prawie identyczna',
     'large-v3': 'Lepszy tekst, ale synchronizacja dryfuje i wolniejszy w długich filmach',
     medium: 'Wydajny PC, bez GPU',
@@ -1936,7 +1985,7 @@ function rebuildLanguageSelectOptions(lang) {
   if (!sel) return;
   const originalValue = sel.value;
   const codes = ['auto', 'ko', 'en', 'ja', 'zh', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'hu', 'ar', 'pl'];
-  sel.innerHTML = '';
+  sel.replaceChildren();
   codes.forEach((code) => {
     const opt = document.createElement('option');
     opt.value = code;
@@ -1958,7 +2007,7 @@ function rebuildDeviceSelectOptions(lang) {
   });
   sel.value = original;
   const deviceStatus = document.getElementById('deviceStatus');
-  if (deviceStatus) deviceStatus.innerHTML = I18N[lang].deviceStatusHtml;
+  if (deviceStatus) setStatusMarkup(deviceStatus, I18N[lang].deviceStatusHtml);
 }
 
 function rebuildTranslationSelectOptions(lang) {
@@ -1973,15 +2022,18 @@ function rebuildTranslationSelectOptions(lang) {
   sel.value = original;
   const translationStatus = document.getElementById('translationStatus');
   if (translationStatus) {
-    if (original === 'none') translationStatus.innerHTML = I18N[lang].translationDisabledHtml;
-    else if (original === 'local') updateLocalModelStatus();
-    else if (original === 'deepl')
-      translationStatus.innerHTML = I18N[lang].translationDeeplHtml || I18N[lang].translationEnabledHtml;
+    let statusMarkup = I18N[lang].translationEnabledHtml;
+    if (original === 'none') statusMarkup = I18N[lang].translationDisabledHtml;
+    else if (original === 'local') {
+      updateLocalModelStatus();
+      statusMarkup = null;
+    } else if (original === 'deepl')
+      statusMarkup = I18N[lang].translationDeeplHtml || I18N[lang].translationEnabledHtml;
     else if (original === 'chatgpt')
-      translationStatus.innerHTML = I18N[lang].translationChatgptHtml || I18N[lang].translationEnabledHtml;
+      statusMarkup = I18N[lang].translationChatgptHtml || I18N[lang].translationEnabledHtml;
     else if (original === 'gemini')
-      translationStatus.innerHTML = I18N[lang].translationGeminiHtml || I18N[lang].translationEnabledHtml;
-    else translationStatus.innerHTML = I18N[lang].translationEnabledHtml;
+      statusMarkup = I18N[lang].translationGeminiHtml || I18N[lang].translationEnabledHtml;
+    if (statusMarkup) setStatusMarkup(translationStatus, statusMarkup);
   }
   // Local 서브-셀렉트 가시성 토글 (local일 때만 표시)
   const localGrp = document.getElementById('localModelGroup');
@@ -1996,9 +2048,12 @@ async function checkGpuCompatibility() {
   const lang = I18N[currentUiLang];
   const deviceStatus = document.getElementById('deviceStatus');
   if (!info.cudaCompatible && deviceStatus) {
-    deviceStatus.innerHTML = lang.gpuIncompatibleHtml
-      ? lang.gpuIncompatibleHtml(info.name, info.computeCap)
-      : `<strong style="color:#e74c3c;">⚠ ${info.name} (Compute ${info.computeCap})</strong><br>CUDA 12 requires Compute 5.0+. GPU mode unavailable. CPU mode will be used automatically.`;
+    setStatusMarkup(
+      deviceStatus,
+      lang.gpuIncompatibleHtml
+        ? lang.gpuIncompatibleHtml(info.name, info.computeCap)
+        : `<strong style="color:#e74c3c;">⚠ ${info.name} (Compute ${info.computeCap})</strong><br>CUDA 12 requires Compute 5.0+. GPU mode unavailable. CPU mode will be used automatically.`
+    );
   }
 }
 
@@ -2235,14 +2290,17 @@ function applyI18n(lang) {
   if (d.emptyQueueTitle) setText('emptyQueueTitle', d.emptyQueueTitle);
   if (d.emptyQueueHint) {
     const hint = document.getElementById('emptyQueueHint');
-    if (hint) hint.innerHTML = d.emptyQueueHint.replace(/\n/g, '<br>');
+    if (hint) setSafeHtml(hint, d.emptyQueueHint.replace(/\n/g, '<br>'));
   }
 
   // 설정 모달 i18n
   setText('settingsModalTitle', d.settingsModalTitle);
   const soundSection = document.getElementById('soundSectionTitle');
   if (soundSection)
-    soundSection.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg> ${d.soundSectionTitle}`;
+    setSafeHtml(
+      soundSection,
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg> ${d.soundSectionTitle}`
+    );
   setText('soundEnabledLabel', d.soundEnabled);
   setText('soundVolumeLabelModal', d.soundVolume);
   setText('soundTestLabelModal', d.soundTest);
@@ -2252,7 +2310,10 @@ function applyI18n(lang) {
   if (d.historyToggleHint) setText('historyHint', d.historyToggleHint);
   const apiSection = document.getElementById('apiSectionTitle');
   if (apiSection)
-    apiSection.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> ${d.apiSectionTitle}`;
+    setSafeHtml(
+      apiSection,
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg> ${d.apiSectionTitle}`
+    );
   setText('labelDeeplKey', d.labelDeeplKey);
   setText('labelOpenaiKey', d.labelOpenaiKey);
   setText('labelGeminiKey', d.labelGeminiKey);
@@ -2262,15 +2323,15 @@ function applyI18n(lang) {
   const deeplInput = document.getElementById('deeplApiKey');
   if (deeplInput) deeplInput.placeholder = d.deeplPlaceholder;
   const deeplHelp = document.getElementById('deeplHelp');
-  if (deeplHelp) deeplHelp.innerHTML = d.deeplHelpHtml;
+  if (deeplHelp) setSafeHtml(deeplHelp, d.deeplHelpHtml);
   const openaiInput = document.getElementById('openaiApiKey');
   if (openaiInput) openaiInput.placeholder = d.openaiPlaceholder;
   const openaiHelp = document.getElementById('openaiHelp');
-  if (openaiHelp) openaiHelp.innerHTML = d.openaiHelpHtml;
+  if (openaiHelp) setSafeHtml(openaiHelp, d.openaiHelpHtml);
   const geminiInput = document.getElementById('geminiApiKey');
   if (geminiInput) geminiInput.placeholder = d.geminiPlaceholder;
   const geminiHelp = document.getElementById('geminiHelp');
-  if (geminiHelp) geminiHelp.innerHTML = d.geminiHelpHtml;
+  if (geminiHelp) setSafeHtml(geminiHelp, d.geminiHelpHtml);
   // 토글 버튼 툴팁
   document.querySelectorAll('.toggle-password').forEach((btn) => {
     btn.title = d.togglePasswordShow || 'Show password';
@@ -2312,7 +2373,7 @@ function updateModelSelect() {
   // 현재 선택된 모델 저장 (언어 변경 시 유지)
   const previousValue = modelSelect.value;
 
-  modelSelect.innerHTML = '';
+  modelSelect.replaceChildren();
 
   // 성능 좋은 순서 (위가 더 좋음). large-v2-sync는 별도 엔진(Faster-Whisper-XXL). 장치 선택을 따른다.
   const ids = ['large-v3-turbo', 'large-v2-sync', 'large-v2-sync-lite', 'large-v3', 'medium', 'small', 'base', 'tiny'];
@@ -2360,7 +2421,7 @@ function updateModelSelect() {
   if (modelStatus) {
     const base = I18N[currentUiLang].modelStatusText(availableCount);
     const manageLabel = I18N[currentUiLang].modelManageHint || 'Pre-download in Model Manager';
-    modelStatus.innerHTML = `${base} <a href="#" id="openModelsLink" class="inline-link">${manageLabel} →</a>`;
+    setSafeHtml(modelStatus, `${base} <a href="#" id="openModelsLink" class="inline-link">${manageLabel} →</a>`);
     const openLink = document.getElementById('openModelsLink');
     if (openLink)
       openLink.addEventListener('click', (e) => {
@@ -2426,13 +2487,14 @@ function updateModelRequirements(modelId) {
 
   const reqText = texts[currentUiLang] || texts.en;
   // 모델 상세 설명(select 드롭다운 잘림 피해 이리로 옮긴 것). select 아래에 풀로 표시.
-  const descMap = (typeof MODEL_DESC_I18N !== 'undefined' && (MODEL_DESC_I18N[currentUiLang] || MODEL_DESC_I18N.en)) || {};
+  const descMap =
+    (typeof MODEL_DESC_I18N !== 'undefined' && (MODEL_DESC_I18N[currentUiLang] || MODEL_DESC_I18N.en)) || {};
   const descText = descMap[modelId] || '';
   const descHtml = descText ? `<span class="model-req-desc">${descText}</span><br>` : '';
 
   const isInstalled = !!(typeof availableModels !== 'undefined' && availableModels && availableModels[modelId]);
   if (isInstalled) {
-    requirementsEl.innerHTML = `${descHtml}${reqText}`;
+    setSafeHtml(requirementsEl, `${descHtml}${reqText}`);
     requirementsEl.classList.remove('need-download');
   } else {
     const warn = {
@@ -2442,7 +2504,10 @@ function updateModelRequirements(modelId) {
       zh: '⚠ 未安装 — 启动时自动下载，或在模型管理中预先下载。',
       pl: '⚠ Nie zainstalowano — pobierze się automatycznie lub możesz pobrać wcześniej w Menedżerze modeli.',
     };
-    requirementsEl.innerHTML = `${descHtml}${reqText}<br><span class="need-download-msg">${warn[currentUiLang] || warn.en}</span>`;
+    setSafeHtml(
+      requirementsEl,
+      `${descHtml}${reqText}<br><span class="need-download-msg">${warn[currentUiLang] || warn.en}</span>`
+    );
     requirementsEl.classList.add('need-download');
   }
 }
@@ -2484,13 +2549,16 @@ function updateQueueDisplayImmediate() {
     if (pauseBtn) pauseBtn.style.display = 'none';
     stopBtn.style.display = 'none';
     // 빈 상태 메시지 표시
-    queueList.innerHTML = `<div class="queue-empty">
+    setSafeHtml(
+      queueList,
+      `<div class="queue-empty">
       <div class="queue-empty-icon queue-empty-pixel">
         <img src="assets/px-empty-queue.png?v=3" alt="" aria-hidden="true"/>
       </div>
       <p class="queue-empty-title">${d.emptyQueueTitle || d.queueEmpty || 'Queue is empty'}</p>
       <p class="queue-empty-hint">${(d.emptyQueueHint || 'Drop a video or SRT file onto the dropzone').replace(/\n/g, '<br>')}</p>
-    </div>`;
+    </div>`
+    );
     return;
   }
 
@@ -2522,78 +2590,81 @@ function updateQueueDisplayImmediate() {
       .replace(/>/g, '&gt;');
   }
 
-  queueList.innerHTML = fileQueue
-    .map((file, index) => {
-      const fullFileName = file.path.split('\\').pop() || file.path.split('/').pop();
-      const ext = fullFileName.lastIndexOf('.') > 0 ? fullFileName.substring(fullFileName.lastIndexOf('.')) : '';
-      const isSrt = ext.toLowerCase() === '.srt';
+  setSafeHtml(
+    queueList,
+    fileQueue
+      .map((file, index) => {
+        const fullFileName = file.path.split('\\').pop() || file.path.split('/').pop();
+        const ext = fullFileName.lastIndexOf('.') > 0 ? fullFileName.substring(fullFileName.lastIndexOf('.')) : '';
+        const isSrt = ext.toLowerCase() === '.srt';
 
-      // 파일명 표시: 이름 부분만 줄이고 확장자는 뱃지로 표시
-      const nameWithoutExt = fullFileName.substring(0, fullFileName.length - ext.length);
-      const maxNameLength = 25;
-      let displayName = nameWithoutExt;
-      if (nameWithoutExt.length > maxNameLength) {
-        displayName = nameWithoutExt.substring(0, maxNameLength) + '...';
-      }
-      // 확장자 뱃지 (SRT는 보라색, 동영상은 초록색)
-      const extBadge = isSrt
-        ? `<span class="ext-badge srt">SRT</span>`
-        : `<span class="ext-badge video">${ext.toUpperCase().substring(1)}</span>`;
+        // 파일명 표시: 이름 부분만 줄이고 확장자는 뱃지로 표시
+        const nameWithoutExt = fullFileName.substring(0, fullFileName.length - ext.length);
+        const maxNameLength = 25;
+        let displayName = nameWithoutExt;
+        if (nameWithoutExt.length > maxNameLength) {
+          displayName = nameWithoutExt.substring(0, maxNameLength) + '...';
+        }
+        // 확장자 뱃지 (SRT는 보라색, 동영상은 초록색)
+        const extBadge = isSrt
+          ? `<span class="ext-badge srt">SRT</span>`
+          : `<span class="ext-badge video">${ext.toUpperCase().substring(1)}</span>`;
 
-      const isValid = isVideoFile(file.path) || isSrtFile(file.path);
+        const isValid = isVideoFile(file.path) || isSrtFile(file.path);
 
-      let statusText = d.qWaiting;
-      let itemClass = 'queue-item';
+        let statusText = d.qWaiting;
+        let itemClass = 'queue-item';
 
-      if (file.status === 'completed') {
-        statusText = d.qCompleted;
-        itemClass = 'queue-item completed';
-      } else if (file.status === 'processing') {
-        statusText = d.qProcessing;
-        itemClass = 'queue-item processing';
-      } else if (file.status === 'translating') {
-        statusText = d.qTranslating;
-        itemClass = 'queue-item processing';
-      } else if (file.status === 'stopped') {
-        statusText = d.qStopped;
-        itemClass = 'queue-item error';
-      } else if (file.status === 'skipped') {
-        statusText = d.qSkipped || 'Skipped';
-        itemClass = 'queue-item skipped';
-      } else if (file.status === 'error') {
-        statusText = d.qError;
-        itemClass = 'queue-item error';
-      } else if (!isValid) {
-        statusText = d.qUnsupported;
-        itemClass = 'queue-item error';
-      }
+        if (file.status === 'completed') {
+          statusText = d.qCompleted;
+          itemClass = 'queue-item completed';
+        } else if (file.status === 'processing') {
+          statusText = d.qProcessing;
+          itemClass = 'queue-item processing';
+        } else if (file.status === 'translating') {
+          statusText = d.qTranslating;
+          itemClass = 'queue-item processing';
+        } else if (file.status === 'stopped') {
+          statusText = d.qStopped;
+          itemClass = 'queue-item error';
+        } else if (file.status === 'skipped') {
+          statusText = d.qSkipped || 'Skipped';
+          itemClass = 'queue-item skipped';
+        } else if (file.status === 'error') {
+          statusText = d.qError;
+          itemClass = 'queue-item error';
+        } else if (!isValid) {
+          statusText = d.qUnsupported;
+          itemClass = 'queue-item error';
+        }
 
-      const maxPathLength = 80;
-      const displayPath = file.path.length > maxPathLength ? file.path.substring(0, maxPathLength) + '...' : file.path;
+        const maxPathLength = 80;
+        const displayPath =
+          file.path.length > maxPathLength ? file.path.substring(0, maxPathLength) + '...' : file.path;
 
-      const btnOpen = d.btnOpen;
-      const btnRemove = d.btnRemove;
-      const processingBadge = `<span style="color: #ffc107; font-size: 12px; font-weight: 600;">${d.qProcessing}</span>`;
+        const btnOpen = d.btnOpen;
+        const btnRemove = d.btnRemove;
+        const processingBadge = `<span style="color: #ffc107; font-size: 12px; font-weight: 600;">${d.qProcessing}</span>`;
 
-      // 처리 중이 아닌 경우에만 드래그 가능
-      const isDraggable = file.status !== 'processing' && file.status !== 'translating';
-      const dragAttr = isDraggable ? `draggable="true" data-index="${index}"` : '';
+        // 처리 중이 아닌 경우에만 드래그 가능
+        const isDraggable = file.status !== 'processing' && file.status !== 'translating';
+        const dragAttr = isDraggable ? `draggable="true" data-index="${index}"` : '';
 
-      // Safe HTML generation: all user data in data-* attrs only, no inline JS
-      let actionButtons = '';
-      if (file.status === 'completed') {
-        actionButtons = `<button class="btn-success btn-sm" data-action="open" data-index="${index}">${escAttr(btnOpen)}</button>`;
-      } else if (file.status === 'processing' || file.status === 'translating') {
-        actionButtons = processingBadge;
-      } else if (file.status === 'error' || file.status === 'stopped') {
-        actionButtons =
-          `<button class="btn-warning btn-sm" style="margin-right:4px;" data-action="retry" data-index="${index}">${escAttr(d.btnRetry || 'Retry')}</button>` +
-          `<button class="btn-danger btn-sm" data-action="remove" data-index="${index}">${escAttr(btnRemove)}</button>`;
-      } else {
-        actionButtons = `<button class="btn-danger btn-sm" data-action="remove" data-index="${index}">${escAttr(btnRemove)}</button>`;
-      }
+        // Safe HTML generation: all user data in data-* attrs only, no inline JS
+        let actionButtons = '';
+        if (file.status === 'completed') {
+          actionButtons = `<button class="btn-success btn-sm" data-action="open" data-index="${index}">${escAttr(btnOpen)}</button>`;
+        } else if (file.status === 'processing' || file.status === 'translating') {
+          actionButtons = processingBadge;
+        } else if (file.status === 'error' || file.status === 'stopped') {
+          actionButtons =
+            `<button class="btn-warning btn-sm" style="margin-right:4px;" data-action="retry" data-index="${index}">${escAttr(d.btnRetry || 'Retry')}</button>` +
+            `<button class="btn-danger btn-sm" data-action="remove" data-index="${index}">${escAttr(btnRemove)}</button>`;
+        } else {
+          actionButtons = `<button class="btn-danger btn-sm" data-action="remove" data-index="${index}">${escAttr(btnRemove)}</button>`;
+        }
 
-      return `
+        return `
       <div class="${itemClass}${isDraggable ? ' draggable' : ''}" ${dragAttr}>
         ${isDraggable ? `<div class="drag-handle" title="${escAttr(d.dragHandleTooltip || 'Drag to reorder')}">&#9776;</div>` : ''}
         <div class="file-info">
@@ -2604,8 +2675,9 @@ function updateQueueDisplayImmediate() {
         <div>${actionButtons}</div>
       </div>
     `;
-    })
-    .join('');
+      })
+      .join('')
+  );
 
   // 드래그 앤 드롭 이벤트 설정
   setupQueueDragAndDrop();
@@ -2931,24 +3003,24 @@ function initTranslationSelect() {
     const method = translationSelect.value;
     if (method === 'none') {
       targetLanguageGroup.style.display = 'none';
-      if (translationStatus) translationStatus.innerHTML = I18N[currentUiLang].translationDisabledHtml;
+      if (translationStatus) setStatusMarkup(translationStatus, I18N[currentUiLang].translationDisabledHtml);
     } else {
       targetLanguageGroup.style.display = '';
       if (translationStatus) {
         // 선택한 번역 방법에 따라 다른 메시지 표시
         if (method === 'mymemory') {
-          translationStatus.innerHTML = I18N[currentUiLang].translationEnabledHtml;
+          setStatusMarkup(translationStatus, I18N[currentUiLang].translationEnabledHtml);
         } else if (method === 'deepl') {
-          translationStatus.innerHTML = I18N[currentUiLang].translationDeeplHtml;
+          setStatusMarkup(translationStatus, I18N[currentUiLang].translationDeeplHtml);
         } else if (method === 'chatgpt') {
-          translationStatus.innerHTML = I18N[currentUiLang].translationChatgptHtml;
+          setStatusMarkup(translationStatus, I18N[currentUiLang].translationChatgptHtml);
         } else if (method === 'gemini') {
-          translationStatus.innerHTML = I18N[currentUiLang].translationGeminiHtml;
+          setStatusMarkup(translationStatus, I18N[currentUiLang].translationGeminiHtml);
         } else if (method === 'local') {
           // Check model install status
           updateLocalModelStatus();
         } else {
-          translationStatus.innerHTML = I18N[currentUiLang].translationEnabledHtml;
+          setStatusMarkup(translationStatus, I18N[currentUiLang].translationEnabledHtml);
         }
       }
     }
@@ -3226,7 +3298,10 @@ function renderLocalModelRequirements(modelId) {
     pl: { fast: 'Szybko', slow: 'Wolno (wysoka jakość)', normal: 'Normalnie' },
   };
   const speed = (speedMap[currentUiLang] || speedMap.en)[speedKey];
-  el.innerHTML = `<span style="font-size:10.5px;color:var(--text-muted)">${label}: VRAM ${r.vram} / RAM ${r.ram} · ${speed}</span>`;
+  setSafeHtml(
+    el,
+    `<span style="font-size:10.5px;color:var(--text-muted)">${label}: VRAM ${r.vram} / RAM ${r.ram} · ${speed}</span>`
+  );
 }
 
 async function updateLocalModelStatus() {
@@ -3250,16 +3325,23 @@ async function updateLocalModelStatus() {
   const sizeText = info.sizeMB ? ` (${(info.sizeMB / 1024).toFixed(1)} GB)` : '';
 
   if (info.installed) {
-    statusEl.innerHTML = `<span style="color:var(--accent)">${d.localModelInstalledHtml || '&#10003; Hy-MT2 model installed'}${sizeText}</span>`;
+    setSafeHtml(
+      statusEl,
+      `<span style="color:var(--accent)">${d.localModelInstalledHtml || '&#10003; Hy-MT2 model installed'}${sizeText}</span>`
+    );
   } else if (_localDownloading) {
-    statusEl.innerHTML = `
-      <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${d.localModelDownloadingHtml || 'Downloading Hy-MT2 Q4...'} <span id="localDlPercent">0%</span></div>
+    setSafeHtml(
+      statusEl,
+      `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${d.localModelDownloadingHtml || 'Downloading Hy-MT2 Q4...'} <span id="localDlPercent">0%</span></div>
       <div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;width:100%">
         <div id="localDlBar" style="height:100%;width:0%;background:var(--accent);transition:width 0.3s;"></div>
-      </div>
-    `;
+      </div>`
+    );
   } else {
-    statusEl.innerHTML = `<span style="color:var(--text-muted);font-size:11px">${d.localModelMissingHtml || '⚠ Hy-MT2 model not installed — auto-downloads on start'}${sizeText}</span>`;
+    setSafeHtml(
+      statusEl,
+      `<span style="color:var(--text-muted);font-size:11px">${d.localModelMissingHtml || '⚠ Hy-MT2 model not installed — auto-downloads on start'}${sizeText}</span>`
+    );
   }
 }
 
@@ -3275,12 +3357,13 @@ if (window.electronAPI?.onLocalModelProgress) {
     let bar = document.getElementById('localDlBar');
     let pct = document.getElementById('localDlPercent');
     if (!bar || !pct) {
-      statusEl.innerHTML = `
-        <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${I18N[currentUiLang].localModelDownloadingHtml || 'Downloading Hy-MT2 Q4...'} <span id="localDlPercent">${percent}%</span></div>
+      setSafeHtml(
+        statusEl,
+        `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${I18N[currentUiLang].localModelDownloadingHtml || 'Downloading Hy-MT2 Q4...'} <span id="localDlPercent">${percent}%</span></div>
         <div style="height:4px;background:var(--bg-tertiary);border-radius:2px;overflow:hidden;width:100%">
           <div id="localDlBar" style="height:100%;width:${percent}%;background:var(--accent);transition:width 0.3s;"></div>
-        </div>
-      `;
+        </div>`
+      );
     } else {
       bar.style.width = percent + '%';
       pct.textContent = percent + '%';
@@ -3335,7 +3418,7 @@ function buildCustomSelect(selectEl) {
   selectEl.classList.add('custom-hidden');
 
   function refreshOptions() {
-    dropdown.innerHTML = '';
+    dropdown.replaceChildren();
     const opts = Array.from(selectEl.options);
     opts.forEach((opt) => {
       if (opt.hidden) return;
@@ -4181,7 +4264,7 @@ async function testApiKeys() {
         status.style.border = '1px solid #ffeeba';
         status.style.color = '#856404';
       }
-      status.innerHTML = messages.join('<br>');
+      setSafeHtml(status, messages.join('<br>'));
     } else if (status) {
       const pleaseEnterMsg = {
         ko: '키 먼저 입력!',
@@ -4549,20 +4632,24 @@ function renderHistory(filter) {
 
   const d = I18N[currentUiLang] || I18N.ko;
   if (!filtered.length) {
-    listEl.innerHTML = `
-      <div class="history-empty">
+    setSafeHtml(
+      listEl,
+      `<div class="history-empty">
         <div class="history-empty-pixel">
           <img src="assets/px-empty-history.png?v=3" alt="" aria-hidden="true"/>
         </div>
         <p class="history-empty-title">${q ? d.histNoResult || 'No results' : d.histEmptyTitle || 'No history yet'}</p>
         <p class="history-empty-hint">${q ? d.histNoResultHint || 'Try another search' : d.histEmptyHint || 'Process a file to see it here'}</p>
-      </div>`;
+      </div>`
+    );
     return;
   }
 
-  listEl.innerHTML = filtered
-    .map(
-      (it) => `
+  setSafeHtml(
+    listEl,
+    filtered
+      .map(
+        (it) => `
     <div class="history-item">
       <span class="history-item-status ${it.status === 'success' ? 'success' : 'failed'}" title="${it.status}"></span>
       <span class="history-item-name" title="${_esc(it.path || it.name)}">${_esc(it.name || '')}</span>
@@ -4574,8 +4661,9 @@ function renderHistory(filter) {
       </span>
     </div>
   `
-    )
-    .join('');
+      )
+      .join('')
+  );
 
   // Bind action buttons:
   //  - data-hist-open  → 파일 자체 실행 (영상=플레이어, .srt=에디터)
@@ -4662,7 +4750,7 @@ function _updateModelCardProgress(cardId, percent) {
   if (!bar) {
     bar = document.createElement('div');
     bar.className = 'model-card-progress';
-    bar.innerHTML = '<div class="model-card-progress-fill"></div><span class="model-card-progress-text"></span>';
+    setSafeHtml(bar, '<div class="model-card-progress-fill"></div><span class="model-card-progress-text"></span>');
     const actions = card.querySelector('.model-card-actions');
     if (actions) actions.parentNode.insertBefore(bar, actions);
   }
@@ -4871,7 +4959,7 @@ async function renderModels() {
         <div class="model-card-meta">
           <div class="model-card-meta-item">
             <span class="model-card-meta-label">${D.modelMetaSize || 'Size'}</span>
-            <span class="model-card-meta-value">${m.sizeKey === 'shared' ? (D.modelSizeShared || 'Shared') : m.size}</span>
+            <span class="model-card-meta-value">${m.sizeKey === 'shared' ? D.modelSizeShared || 'Shared' : m.size}</span>
           </div>
           <div class="model-card-meta-item">
             <span class="model-card-meta-label">${D.modelMetaVram || 'VRAM'}</span>
@@ -4896,8 +4984,9 @@ async function renderModels() {
   const sectionTrHint = D.modelSectionTranslationHint || 'Text → another language';
   const sectionAsHint = D.modelSectionAsrHint || 'Audio → subtitle text';
 
-  grid.innerHTML = `
-    <section class="model-section">
+  setSafeHtml(
+    grid,
+    `<section class="model-section">
       <header class="model-section-header">
         <div class="model-section-title-wrap">
           <span class="model-section-dot lavender"></span>
@@ -4918,8 +5007,8 @@ async function renderModels() {
         <span class="model-section-count">${asrModels.filter((m) => installedSet.has(m.id)).length} / ${asrModels.length}</span>
       </header>
       <div class="model-section-grid">${asrModels.map(cardHtml).join('')}</div>
-    </section>
-  `;
+    </section>`
+  );
 
   // Bind download actions
   grid.querySelectorAll('[data-model-action="download"]').forEach((btn) => {

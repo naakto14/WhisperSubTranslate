@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const EnhancedSubtitleTranslator = require('../translator-enhanced');
+const localTranslator = require('../local-translator');
 const { hasWhisperRuntimeLibraries } = require('./postinstall');
 const { applySrtCleanup, isSdhOnlyText, srtFromWhisperJson } = require('../srt-cleanup');
 
@@ -19,10 +20,22 @@ function runSrtCleanup() {
 
   // SDH (A안): drop tag-only cues, keep mixed lines, renumber
   const sdh = [
-    '1', '00:00:01,000 --> 00:00:03,000', '[music playing]', '',
-    '2', '00:00:04,000 --> 00:00:06,000', "(sighs) I can't believe it", '',
-    '3', '00:00:07,000 --> 00:00:08,000', '(applause)', '',
-    '4', '00:00:09,000 --> 00:00:10,000', 'Real dialogue', '',
+    '1',
+    '00:00:01,000 --> 00:00:03,000',
+    '[music playing]',
+    '',
+    '2',
+    '00:00:04,000 --> 00:00:06,000',
+    "(sighs) I can't believe it",
+    '',
+    '3',
+    '00:00:07,000 --> 00:00:08,000',
+    '(applause)',
+    '',
+    '4',
+    '00:00:09,000 --> 00:00:10,000',
+    'Real dialogue',
+    '',
   ].join('\n');
   const sdhOut = applySrtCleanup(sdh, { removeSDH: true });
   assert.ok(!sdhOut.includes('[music playing]') && !/\(applause\)/.test(sdhOut));
@@ -86,7 +99,100 @@ function runWhisperRuntimeProbe() {
   }
 }
 
-function run() {
+async function runLocalTranslationGuards() {
+  assert.strictEqual(localTranslator.looksUntranslated('Hola mundo!', 'Hola mundo.', 'en'), true);
+  assert.strictEqual(localTranslator.looksUntranslated('Hello world', 'Hola mundo', 'en'), false);
+  assert.strictEqual(localTranslator.looksUntranslated('こんにちは', 'こんにちは', 'en'), true);
+  assert.strictEqual(localTranslator.isEffectivelySameText('Original: Hola mundo', 'Hola mundo', 1), true);
+
+  const waitForAbort = (signal) =>
+    new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  await assert.rejects(() => localTranslator.withTimeout(waitForAbort, 20), /LOCAL_TIMEOUT/);
+
+  const parent = new AbortController();
+  const aborted = localTranslator.withTimeout(waitForAbort, 1000, parent.signal);
+  parent.abort(new Error('ABORTED: test'));
+  await assert.rejects(() => aborted, /ABORTED/);
+
+  const sequential = new EnhancedSubtitleTranslator();
+  let active = 0;
+  let maxActive = 0;
+  sequential.translateAuto = async (text) => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active--;
+    return `translated ${text}`;
+  };
+  await sequential.translateBatch(['one', 'two', 'three'], 'local', 'en');
+  assert.strictEqual(maxActive, 1, 'local translations must not queue parallel work behind the model mutex');
+
+  const timeout = new EnhancedSubtitleTranslator();
+  timeout.translateAuto = async () => {
+    throw new Error('LOCAL_TIMEOUT: test');
+  };
+  await assert.rejects(() => timeout.translateBatch(['one', 'two'], 'local', 'en'), /LOCAL_TIMEOUT/);
+
+  const passthrough = new EnhancedSubtitleTranslator();
+  let calls = 0;
+  passthrough.translateAuto = async () => {
+    calls++;
+    throw new Error('LOCAL_UNTRANSLATED: test');
+  };
+  await assert.rejects(
+    () => passthrough.translateBatch(['one', 'two', 'three', 'four', 'five', 'six'], 'local', 'en'),
+    /TRANSLATION_PASSTHROUGH/
+  );
+  assert.strictEqual(calls, 5, 'repeated local echoes should fail before processing the whole file');
+
+  const makeSrt = (texts) =>
+    texts
+      .map(
+        (text, i) =>
+          `${i + 1}\n00:00:${String(i).padStart(2, '0')},000 --> 00:00:${String(i + 1).padStart(2, '0')},000\n${text}`
+      )
+      .join('\n\n');
+
+  const exactEcho = new EnhancedSubtitleTranslator();
+  exactEcho.translateBatch = async (texts) => texts;
+  await assert.rejects(
+    () => exactEcho.translateSRTContent(makeSrt(Array(4).fill('Hola mundo')), 'local', 'en'),
+    /TRANSLATION_PASSTHROUGH/
+  );
+
+  const normalizedGuard = new EnhancedSubtitleTranslator();
+  normalizedGuard.translateBatch = async (texts) => texts.map((text) => `${text}!!!`);
+  await assert.rejects(
+    () => normalizedGuard.translateSRTContent(makeSrt(Array(4).fill('Hola mundo')), 'local', 'en'),
+    /TRANSLATION_PASSTHROUGH/
+  );
+
+  const mostlyUntranslated = new EnhancedSubtitleTranslator();
+  mostlyUntranslated.translateBatch = async (texts) =>
+    texts.map((text, index) => (index === 4 ? 'Translated line' : text));
+  await assert.rejects(
+    () => mostlyUntranslated.translateSRTContent(makeSrt(Array(5).fill('Hola mundo')), 'local', 'en'),
+    /TRANSLATION_PASSTHROUGH/
+  );
+
+  const labeledEcho = new EnhancedSubtitleTranslator();
+  labeledEcho.translateBatch = async (texts) => texts.map((text) => `Original: ${text}`);
+  await assert.rejects(
+    () => labeledEcho.translateSRTContent(makeSrt(['Hola mundo']), 'local', 'en'),
+    /TRANSLATION_PASSTHROUGH/
+  );
+
+  const validWithName = new EnhancedSubtitleTranslator();
+  validWithName.translateBatch = async () => ['Christopher', 'Hello', 'Good morning', 'Thank you', 'Goodbye'];
+  const validOutput = await validWithName.translateSRTContent(
+    makeSrt(['Christopher', 'Hola', 'Buenos días', 'Gracias', 'Adiós']),
+    'local',
+    'en'
+  );
+  assert.ok(validOutput.includes('Christopher') && validOutput.includes('Goodbye'));
+}
+
+async function run() {
   const translator = new EnhancedSubtitleTranslator();
 
   assert.strictEqual(translator.mapToDeepLLang('ko'), 'KO');
@@ -107,21 +213,17 @@ function run() {
 
   const parsed = translator.parseContextAwareJson('```json\n{"translations":["안녕"],"summary":"greeting"}\n```');
   assert.deepStrictEqual(parsed.translations, ['안녕']);
-  assert.throws(
-    () => translator.parseContextAwareJson('not json'),
-    /Invalid context-aware translation response/
-  );
+  assert.throws(() => translator.parseContextAwareJson('not json'), /Invalid context-aware translation response/);
 
   runSrtCleanup();
   runSrtFromWhisperJson();
   runWhisperRuntimeProbe();
+  await runLocalTranslationGuards();
 
   console.log('Smoke tests passed.');
 }
 
-try {
-  run();
-} catch (error) {
+run().catch((error) => {
   console.error(error);
   process.exit(1);
-}
+});

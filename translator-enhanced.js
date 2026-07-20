@@ -228,6 +228,7 @@ class EnhancedSubtitleTranslator {
 
   abort() {
     this._aborted = true;
+    localTranslator.abortTranslation();
     console.log('[Translator] Abort requested');
   }
 
@@ -1289,15 +1290,19 @@ ${lines}`;
   async translateBatch(texts, method = null, targetLang = null, _sourceLang = null, progressCallback = null) {
     const preferredMethod = method || this.apiKeys.preferredService;
 
-    if (!this.apiKeys.batchTranslation || texts.length <= 1) {
-      // 배치 모드가 비활성화되어 있거나 텍스트가 1개 이하면 개별 번역
+    if (preferredMethod === 'local' || !this.apiKeys.batchTranslation || texts.length <= 1) {
+      // 로컬 엔진은 내부 mutex로 직렬화되므로 여기서 병렬 큐를 만들지 않는다.
       const results = [];
+      let localProcessed = 0;
+      let localUntranslated = 0;
       for (let i = 0; i < texts.length; i++) {
+        if (this._aborted) throw new Error('ABORTED: Translation stopped by user');
         try {
           console.log(`[Batch Translation] ${i + 1}/${texts.length}: ${texts[i].substring(0, 40)}...`);
 
           const result = await this.translateAuto(texts[i], method, targetLang);
           results.push(result);
+          if (preferredMethod === 'local') localProcessed++;
 
           console.log(`[Batch Success] ${i + 1}/${texts.length}: ${result.substring(0, 40)}...`);
 
@@ -1320,7 +1325,19 @@ ${lines}`;
           // 로컬(오프라인)을 고른 경우 온라인 API(mymemory/chatgpt)로 폴백하지 않는다.
           // 사용자 의도(오프라인)와 프라이버시를 존중하고, 잘못된 API 키/할당량 에러도 안 뜨게 한다.
           // 원문 유지 → translateSRTContent의 passthrough 안전망이 명확한 에러로 처리한다.
-          if (method === 'local') {
+          if (preferredMethod === 'local') {
+            const message = String(error?.message || error);
+            // 모델 로드/추론 실패와 사용자 중지는 모든 세그먼트에서 반복하지 말고 즉시 알린다.
+            if (!message.includes('LOCAL_UNTRANSLATED')) throw error;
+
+            localProcessed++;
+            localUntranslated++;
+            const failureSample = Math.min(5, texts.length);
+            if (localProcessed >= failureSample && localUntranslated / localProcessed >= 0.8) {
+              throw new Error(
+                `TRANSLATION_PASSTHROUGH: ${localUntranslated}/${localProcessed} local segments were untranslated.`
+              );
+            }
             console.warn(`[Local] segment failed, keeping original (no online fallback): ${i + 1}/${texts.length}`);
           } else {
             for (let retry = 1; retry <= 2; retry++) {
@@ -1626,15 +1643,15 @@ ${lines}`;
     // 안전망: 로컬 모델 크래시/echo 등으로 모든(또는 대부분) 세그먼트가 원문 그대로면
     // translateBatch가 원문을 유지하므로 '번역된 척' 하는 미번역 파일이 만들어진다.
     // 이런 무성(silent) 실패를 성공으로 보고하지 않도록, 미번역 비율이 과도하면 에러를 던진다.
-    // (부분 실패는 통과 — 0.9 임계값은 사실상 전체 실패만 잡는다. 일·한·중처럼 스크립트가
-    //  완전히 다른 번역은 정상이면 거의 0%만 동일하므로 오탐 위험이 낮다.)
+    // 1~4개짜리 짧은 SRT의 전체 echo와 5개 이상에서 80% 이상 echo를 막는다.
+    // 정상 번역은 원문과 정규화 결과가 달라 이 비율에 도달하지 않는다.
     let unchanged = 0;
     for (let k = 0; k < translatedTexts.length; k++) {
       const src = (textsToTranslate[k] || '').trim();
       const out = (translatedTexts[k] || '').trim();
-      if (src && out === src) unchanged++;
+      if (src && localTranslator.isEffectivelySameText(out, src, 1)) unchanged++;
     }
-    if (translatedTexts.length >= 5 && unchanged / translatedTexts.length >= 0.9) {
+    if (translatedTexts.length > 0 && unchanged / translatedTexts.length >= 0.8) {
       throw new Error(
         `TRANSLATION_PASSTHROUGH: ${unchanged}/${translatedTexts.length} segments were left untranslated ` +
           `(translation engine likely failed or crashed). The subtitles were NOT translated.`
