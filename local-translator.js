@@ -40,6 +40,7 @@ const MODELS = {
   },
 };
 const DEFAULT_MODEL_ID = '1.8b';
+const LOCAL_OPERATION_TIMEOUT_MS = 3 * 60 * 1000;
 
 function getModelUrl(modelId) {
   const m = MODELS[modelId];
@@ -101,12 +102,31 @@ function buildTranslationPrompt(text, targetLang) {
   return `Translate the following segment into ${targetName}, without additional explanation.\n\n${text}`;
 }
 
-// 번역 실패(echo) 감지: 비 CJK 타깃인데 출력이 여전히 CJK 위주면 원문 통과로 판정.
-// 소스에 CJK가 거의 없으면(기호·숫자·라틴 자막) 판정하지 않는다 — 오탐 방지.
+function normalizeComparableText(text) {
+  return String(text || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}\s]+/gu, '');
+}
+
+function isEffectivelySameText(output, source, minLength = 8) {
+  const src = normalizeComparableText(source);
+  const out = normalizeComparableText(output);
+  if (src.length < minLength) return false;
+  if (out === src) return true;
+
+  // "Original: <source>"처럼 짧은 라벨만 붙인 echo도 번역으로 인정하지 않는다.
+  const extraLength = out.length - src.length;
+  return extraLength > 0 && extraLength <= Math.max(16, Math.ceil(src.length * 0.35)) && out.includes(src);
+}
+
+// 번역 실패(echo) 감지: 공백/문장부호만 달라진 원문 반환은 모든 언어에서 잡고,
+// CJK 원문→비 CJK 타깃은 문자 비율로 한 번 더 판정한다.
 function looksUntranslated(output, source, targetLang) {
   const out = (output || '').trim();
   if (!out) return true;
   const src = (source || '').trim();
+  if (isEffectivelySameText(out, src)) return true;
   const srcCjk = (src.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g) || []).length;
   if (srcCjk < 2) return false;
   if (targetLang === 'ja' || targetLang === 'zh' || targetLang === 'zh-Hant' || targetLang === 'yue') {
@@ -129,7 +149,42 @@ let _currentModelId = null; // '1.8b' | '7b'
 let _downloadPromises = {}; // modelId → Promise
 let _loadPromise = null;
 let _translateMutex = Promise.resolve();
+let _activeAbortController = null;
 let _onDownloadProgress = null;
+
+async function withTimeout(run, timeoutMs = LOCAL_OPERATION_TIMEOUT_MS, parentSignal = null) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal.reason);
+  if (parentSignal?.aborted) abortFromParent();
+  else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`LOCAL_TIMEOUT: local model operation exceeded ${timeoutMs}ms`));
+  }, timeoutMs);
+
+  try {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    return await run(controller.signal);
+  } catch (error) {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener('abort', abortFromParent);
+  }
+}
+
+function abortTranslation() {
+  if (_activeAbortController && !_activeAbortController.signal.aborted) {
+    _activeAbortController.abort(new Error('ABORTED: Translation stopped by user'));
+  }
+}
+
+async function acquireTranslateLock() {
+  return await new Promise((resolve) => {
+    const prev = _translateMutex;
+    _translateMutex = new Promise((release) => prev.then(() => resolve(release)));
+  });
+}
 
 function getModelsDir() {
   const { app } = require('electron');
@@ -231,12 +286,22 @@ async function downloadModel(onProgress, signal, modelId = DEFAULT_MODEL_ID) {
           }
       };
     }
-    return _downloadPromises[modelId];
+    return await waitForDownload(_downloadPromises[modelId], signal);
   }
   _downloadPromises[modelId] = _downloadModelImpl(onProgress, signal, modelId).finally(() => {
     delete _downloadPromises[modelId];
   });
-  return _downloadPromises[modelId];
+  return await waitForDownload(_downloadPromises[modelId], signal);
+}
+
+function waitForDownload(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || new Error('Download cancelled'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || new Error('Download cancelled'));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }
 
 async function _downloadModelImpl(onProgress, signal, modelId) {
@@ -248,36 +313,52 @@ async function _downloadModelImpl(onProgress, signal, modelId) {
   const tmp = dest + '.tmp';
 
   return new Promise((resolve, reject) => {
-    const doRequest = (url, redirects = 0) => {
-      if (redirects > 5) return reject(new Error('Too many redirects'));
+    let settled = false;
+    const abortError = () =>
+      signal?.reason instanceof Error ? signal.reason : new Error('Download cancelled');
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        fs.unlinkSync(tmp);
+      } catch {}
+      reject(error);
+    };
 
-      const req = https.get(url, (res) => {
+    const doRequest = (url, redirects = 0) => {
+      if (settled) return;
+      if (signal?.aborted) return fail(abortError());
+      if (redirects > 5) return fail(new Error('Too many redirects'));
+
+      let out = null;
+      let req = null;
+      const detachAbort = () => signal?.removeEventListener('abort', abortRequest);
+      const abortRequest = () => {
+        req?.destroy();
+        out?.destroy();
+        fail(abortError());
+      };
+
+      req = https.get(url, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
+          detachAbort();
           res.resume();
           return doRequest(res.headers.location, redirects + 1);
         }
         if (res.statusCode !== 200) {
-          return reject(new Error(`HTTP ${res.statusCode}`));
+          detachAbort();
+          res.resume();
+          return fail(new Error(`HTTP ${res.statusCode}`));
         }
 
         const total = parseInt(res.headers['content-length'] || m.sizeBytes, 10);
         let downloaded = 0;
-        const out = fs.createWriteStream(tmp);
-
-        if (signal) {
-          signal.addEventListener(
-            'abort',
-            () => {
-              req.destroy();
-              out.destroy();
-              try {
-                fs.unlinkSync(tmp);
-              } catch {}
-              reject(new Error('Download cancelled'));
-            },
-            { once: true }
-          );
-        }
+        out = fs.createWriteStream(tmp);
+        out.on('error', (error) => {
+          detachAbort();
+          res.destroy();
+          fail(error);
+        });
 
         res.on('data', (chunk) => {
           downloaded += chunk.length;
@@ -296,20 +377,30 @@ async function _downloadModelImpl(onProgress, signal, modelId) {
         });
 
         res.on('end', () => {
-          out.close(() => {
-            fs.renameSync(tmp, dest);
-            resolve(dest);
+          detachAbort();
+          out.end(() => {
+            if (settled) return;
+            try {
+              fs.renameSync(tmp, dest);
+              settled = true;
+              resolve(dest);
+            } catch (error) {
+              fail(error);
+            }
           });
         });
 
-        res.on('error', (e) => {
+        res.on('error', (error) => {
+          detachAbort();
           out.destroy();
-          reject(e);
+          fail(error);
         });
       });
 
-      req.on('error', (e) => {
-        if (e.message !== 'Download cancelled') reject(e);
+      signal?.addEventListener('abort', abortRequest, { once: true });
+      req.on('error', (error) => {
+        detachAbort();
+        fail(signal?.aborted ? abortError() : error);
       });
     };
 
@@ -328,15 +419,16 @@ function deleteModel(modelId = DEFAULT_MODEL_ID) {
  * @param {string} device - 'auto' (GPU 우선) 또는 'cpu'
  * @param {string} modelId - '1.8b' | '7b'
  */
-async function loadModel(device = 'auto', modelId = DEFAULT_MODEL_ID) {
+async function loadModelUnlocked(device = 'auto', modelId = DEFAULT_MODEL_ID, signal = null) {
   const desiredMode = device === 'cpu' ? 'cpu' : 'auto';
   if (_model && _currentGpuMode === desiredMode && _currentModelId === modelId) return;
   if (_loadPromise) return _loadPromise;
   _loadPromise = (async () => {
-    if (_model) await unloadModel();
+    // translateLocal이 잡은 mutex 안에서 다시 unloadModel의 mutex를 기다리면 교착된다.
+    if (_model || _llama) await disposeModel();
     const { getLlama } = await import('node-llama-cpp');
     _llama = await getLlama({ gpu: desiredMode === 'cpu' ? false : 'auto' });
-    _model = await _llama.loadModel({ modelPath: getModelPath(modelId) });
+    _model = await _llama.loadModel({ modelPath: getModelPath(modelId), loadSignal: signal });
     _currentGpuMode = desiredMode;
     _currentModelId = modelId;
     console.log(
@@ -348,6 +440,15 @@ async function loadModel(device = 'auto', modelId = DEFAULT_MODEL_ID) {
   return _loadPromise;
 }
 
+async function loadModel(device = 'auto', modelId = DEFAULT_MODEL_ID, signal = null) {
+  const release = await acquireTranslateLock();
+  try {
+    return await loadModelUnlocked(device, modelId, signal);
+  } finally {
+    release();
+  }
+}
+
 /**
  * Translate text using local HY-MT model.
  * @param {string} text
@@ -356,18 +457,18 @@ async function loadModel(device = 'auto', modelId = DEFAULT_MODEL_ID) {
  * @param {string} modelId - '1.8b' | '7b'
  */
 async function translateLocal(text, targetLang, device = 'auto', modelId = DEFAULT_MODEL_ID) {
-  const release = await new Promise((resolve) => {
-    const prev = _translateMutex;
-    _translateMutex = new Promise((r) => prev.then(() => resolve(r)));
-  });
+  const release = await acquireTranslateLock();
+  const controller = new AbortController();
+  _activeAbortController = controller;
   try {
-    return await _translateLocalImpl(text, targetLang, device, modelId);
+    return await _translateLocalImpl(text, targetLang, device, modelId, controller.signal);
   } finally {
+    if (_activeAbortController === controller) _activeAbortController = null;
     release();
   }
 }
 
-async function _translateLocalImpl(text, targetLang, device, modelId) {
+async function _translateLocalImpl(text, targetLang, device, modelId, signal) {
   _maybeCleanupLegacy();
   if (!isModelInstalled(modelId)) {
     console.log(`[Local] 모델 미설치 감지 (${modelId}) → 자동 다운로드 시작...`);
@@ -377,24 +478,34 @@ async function _translateLocalImpl(text, targetLang, device, modelId) {
           `[Local] 다운로드 ${p.percent}% (${Math.round(p.downloaded / 1024 / 1024)}MB / ${Math.round(p.total / 1024 / 1024)}MB)`
         );
       },
-      null,
+      signal,
       modelId
     );
   }
 
-  await loadModel(device, modelId);
-
-  if (!_context) {
-    _context = await _model.createContext({ contextSize: 2048 });
+  try {
+    await withTimeout(
+      async (operationSignal) => {
+        await loadModelUnlocked(device, modelId, operationSignal);
+        if (!_context) {
+          _context = await _model.createContext({ contextSize: 2048, createSignal: operationSignal });
+        }
+      },
+      LOCAL_OPERATION_TIMEOUT_MS,
+      signal
+    );
+    const { LlamaChatSession } = await import('node-llama-cpp');
+    if (!_session) {
+      _session = new LlamaChatSession({
+        contextSequence: _context.getSequence(),
+        chatWrapper: 'auto',
+      });
+    }
+    _session.resetChatHistory();
+  } catch (error) {
+    await disposeModel();
+    throw error;
   }
-  const { LlamaChatSession } = await import('node-llama-cpp');
-  if (!_session) {
-    _session = new LlamaChatSession({
-      contextSequence: _context.getSequence(),
-      chatWrapper: 'auto',
-    });
-  }
-  _session.resetChatHistory();
 
   const prompt = buildTranslationPrompt(text, targetLang);
   const samplingBase = {
@@ -407,13 +518,25 @@ async function _translateLocalImpl(text, targetLang, device, modelId) {
   let response;
   try {
     // 1차: 결정적 샘플링(temp 0) — 자막 번역은 무작위성이 echo(원문 그대로 출력) 사고를 키운다
-    response = (await _session.prompt(prompt, { ...samplingBase, temperature: 0 })).trim();
+    response = (
+      await withTimeout(
+        (operationSignal) => _session.prompt(prompt, { ...samplingBase, temperature: 0, signal: operationSignal }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        signal
+      )
+    ).trim();
 
     // echo 감지 시 공식 권장 샘플링(temp 0.7)으로 1회 재시도
     if (looksUntranslated(response, text, targetLang)) {
       console.warn(`[Local] 번역 결과가 원문 그대로임 → 재시도: "${text.substring(0, 40)}"`);
       _session.resetChatHistory();
-      response = (await _session.prompt(prompt, { ...samplingBase, temperature: 0.7 })).trim();
+      response = (
+        await withTimeout(
+          (operationSignal) => _session.prompt(prompt, { ...samplingBase, temperature: 0.7, signal: operationSignal }),
+          LOCAL_OPERATION_TIMEOUT_MS,
+          signal
+        )
+      ).trim();
     }
   } catch (e) {
     try {
@@ -434,33 +557,34 @@ async function _translateLocalImpl(text, targetLang, device, modelId) {
   return response;
 }
 
-async function unloadModel() {
-  const release = await new Promise((resolve) => {
-    const prev = _translateMutex;
-    _translateMutex = new Promise((r) => prev.then(() => resolve(r)));
-  });
+async function disposeModel() {
   try {
-    try {
-      if (_context) await _context.dispose();
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (_model) await _model.dispose();
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (_llama) await _llama.dispose();
-    } catch {
-      /* ignore */
-    }
-    _session = null;
-    _context = null;
-    _model = null;
-    _llama = null;
-    _currentGpuMode = null;
-    _currentModelId = null;
+    if (_context) await _context.dispose();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (_model) await _model.dispose();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (_llama) await _llama.dispose();
+  } catch {
+    /* ignore */
+  }
+  _session = null;
+  _context = null;
+  _model = null;
+  _llama = null;
+  _currentGpuMode = null;
+  _currentModelId = null;
+}
+
+async function unloadModel() {
+  const release = await acquireTranslateLock();
+  try {
+    await disposeModel();
   } finally {
     release();
   }
@@ -478,7 +602,10 @@ module.exports = {
   loadModel,
   translateLocal,
   buildTranslationPrompt,
+  isEffectivelySameText,
   looksUntranslated,
+  withTimeout,
+  abortTranslation,
   unloadModel,
   setDownloadProgressHandler,
   cleanupLegacyModels,
