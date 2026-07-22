@@ -1892,6 +1892,7 @@ const LANG_NAMES_I18N = {
     pl: '폴란드어',
     tr: '터키어',
     fa: '페르시아어',
+    th: '태국어',
   },
   en: {
     ko: 'Korean',
@@ -1909,6 +1910,7 @@ const LANG_NAMES_I18N = {
     pl: 'Polish',
     tr: 'Turkish',
     fa: 'Persian',
+    th: 'Thai',
   },
   ja: {
     ko: '韓国語',
@@ -1926,6 +1928,7 @@ const LANG_NAMES_I18N = {
     pl: 'ポーランド語',
     tr: 'トルコ語',
     fa: 'ペルシア語',
+    th: 'タイ語',
   },
   zh: {
     ko: '韩语',
@@ -1943,6 +1946,7 @@ const LANG_NAMES_I18N = {
     pl: '波兰语',
     tr: '土耳其语',
     fa: '波斯语',
+    th: '泰语',
   },
   pl: {
     ko: 'Koreański',
@@ -1960,6 +1964,7 @@ const LANG_NAMES_I18N = {
     pl: 'Polski',
     tr: 'Turecki',
     fa: 'Perski',
+    th: 'Tajski',
   },
 };
 
@@ -1984,7 +1989,7 @@ function rebuildLanguageSelectOptions(lang) {
   const sel = document.getElementById('languageSelect');
   if (!sel) return;
   const originalValue = sel.value;
-  const codes = ['auto', 'ko', 'en', 'ja', 'zh', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'hu', 'ar', 'pl'];
+  const codes = ['auto', 'ko', 'en', 'ja', 'zh', 'es', 'fr', 'de', 'it', 'pt', 'ru', 'hu', 'ar', 'pl', 'th'];
   sel.replaceChildren();
   codes.forEach((code) => {
     const opt = document.createElement('option');
